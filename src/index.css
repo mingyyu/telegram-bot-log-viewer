@@ -1,0 +1,72 @@
+* {
+  box-sizing: border-box;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #f0f2f5;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+}
+
+aside {
+  width: 280px;
+  background: #fff;
+  border-right: 1px solid #ddd;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.chat {
+  padding: 8px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.chat:hover {
+  background: #eee;
+}
+
+.chat.active {
+  background: #dbeafe;
+}
+
+main {
+  flex: 1;
+  padding: 15px;
+  overflow-y: auto;
+}
+
+.msg {
+  margin-bottom: 10px;
+}
+
+.msg.in .bubble {
+  background: #fff;
+  align-self: flex-start;
+}
+
+.msg.out {
+  text-align: right;
+}
+
+.msg.out .bubble {
+  background: #dbeafe;
+}
+
+.bubble {
+  display: inline-block;
+  padding: 10px;
+  border-radius: 12px;
+  max-width: 70%;
+  white-space: pre-wrap;
+}
+
+.time {
+  font-size: 11px;
+  color: #666;
+}
