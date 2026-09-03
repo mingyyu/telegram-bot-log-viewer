@@ -1,6 +1,9 @@
 // src/parser.js
 // Robust parser: groups multiline log entries and extracts incoming/outgoing messages
-const TIMESTAMP_RE = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}/;
+// Supports both legacy telegram-bot-api/v5 logs ("Endpoint: ..., response: ...")
+// and new go-telegram/bot logs ("[TGBOT] [DEBUG] response from '<url>' with payload '...'").
+
+const TIMESTAMP_RE = /^\d{4}[/-]\d{2}[/-]\d{2}[T ]\d{2}:\d{2}:\d{2}/;
 
 export function parseLogs(text) {
   // 1) Split into entries: every line that starts with a timestamp begins a new entry.
@@ -16,9 +19,6 @@ export function parseLogs(text) {
     } else {
       // Continuation of previous entry (multiline JSON or other output)
       if (current) current.rawLines.push(raw);
-      else {
-        // stray line before any timestamp — skip or attach to last entry
-      }
     }
   }
   if (current) entries.push(current);
@@ -29,108 +29,156 @@ export function parseLogs(text) {
     const joined = entry.rawLines.join("\n").trim();
 
     // Extract the leading timestamp and the rest (first space after timestamp)
-    const m = joined.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2})\s+(.*)$/s);
+    const m = joined.match(/^(\d{4}[/-]\d{2}[/-]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/s);
     if (!m) continue;
-    const [, tsText, rest] = m;
+    const [, tsText, rawRest] = m;
     const entryTs = new Date(tsText.replace(/\//g, "-"));
 
-    // handle getUpdates response (incoming user updates and callback_query)
-    if (rest.startsWith("Endpoint: getUpdates, response:")) {
-      const jsonText = rest.replace("Endpoint: getUpdates, response:", "").trim();
-      try {
-        const data = JSON.parse(jsonText);
-        for (const upd of data.result ?? []) {
-          // normal message
-          if (upd.message) {
-            const msg = upd.message;
-            messages.push({
-              direction: "in",
-              kind: "message",
-              userId: msg.chat?.id ?? msg.from?.id,
-              username: msg.from?.username,
-              name: msg.from?.first_name,
-              text: msg.text ?? "",
-              ts: new Date((msg.date ?? Math.floor(entryTs.getTime()/1000)) * 1000),
-              raw: joined,
-              entities: msg.entities ?? null,
-            });
-          }
+    // Handle optional secondary timestamp (e.g. docker logs prepending an ISO timestamp before Go's standard logger)
+    let rest = rawRest;
+    const secondTs = rest.match(/^(\d{4}[/-]\d{2}[/-]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/s);
+    if (secondTs) {
+      rest = secondTs[2];
+    }
 
-          // callback_query (button presses) — treat as incoming from user
-          if (upd.callback_query) {
-            const cb = upd.callback_query;
-            messages.push({
-              direction: "in",
-              kind: "callback_query",
-              userId: cb.from?.id,
-              username: cb.from?.username,
-              name: cb.from?.first_name,
-              text: cb.data ?? (cb.message?.text ?? ""),
-              ts: new Date((cb.message?.date ?? Math.floor(entryTs.getTime()/1000)) * 1000),
-              raw: joined,
-              callback_message: cb.message ? {
-                id: cb.message.message_id,
-                text: cb.message.text,
-              } : null,
-            });
-          }
+    let endpoint = null;
+    let jsonText = null;
 
-          // other update types can be added here if needed (edited_message, etc.)
+    if (rest.includes("Endpoint: ")) {
+      // Legacy telegram-bot-api/v5 format:
+      // "Endpoint: <endpoint>, response: <json>"
+      const match = rest.match(/Endpoint:\s*([a-zA-Z0-9_]+),\s*response:\s*([\s\S]*)$/);
+      if (match) {
+        endpoint = match[1];
+        jsonText = match[2].trim();
+      }
+    } else if (rest.includes("with payload '")) {
+      // New go-telegram/bot format:
+      // "... response from '<url>' with payload '<json>'"
+      const fromMarker = "response from '";
+      const payloadMarker = "' with payload '";
+      const fromIdx = rest.indexOf(fromMarker);
+      const payloadIdx = rest.indexOf(payloadMarker);
+
+      if (fromIdx !== -1 && payloadIdx > fromIdx) {
+        const url = rest.slice(fromIdx + fromMarker.length, payloadIdx);
+        // Extract method name from URL path (e.g. "https://api.telegram.org/bot***/sendMessage" -> "sendMessage")
+        endpoint = url.split("/").pop();
+
+        let rawPayload = rest.slice(payloadIdx + payloadMarker.length).trimEnd();
+        if (rawPayload.endsWith("'")) {
+          rawPayload = rawPayload.slice(0, -1);
         }
-      } catch (e) {
-        // if JSON parse fails, skip — but we attempted robust multiline assembling so this should rarely happen
-        // You could log e and joined to debug.
+        jsonText = rawPayload.trim();
       }
     }
 
-    // handle sendMessage response (confirmed outgoing bot message)
-    if (rest.startsWith("Endpoint: sendMessage, response:")) {
-      const jsonText = rest.replace("Endpoint: sendMessage, response:", "").trim();
-      try {
-        const data = JSON.parse(jsonText);
-        const msg = data.result;
-        if (msg) {
+    if (!endpoint || !jsonText) continue;
+
+    let data;
+    try {
+      data = JSON.parse(jsonText);
+    } catch {
+      continue;
+    }
+
+    if (!data || !data.ok) continue;
+
+    // Handle incoming updates (messages, edited messages, callback queries)
+    if (endpoint === "getUpdates") {
+      for (const upd of data.result ?? []) {
+        // Normal incoming message
+        if (upd.message) {
+          const msg = upd.message;
           messages.push({
-            direction: "out",
+            direction: "in",
             kind: "message",
-            userId: msg.chat?.id,
-            username: msg.chat?.username,
-            name: msg.chat?.first_name,
-            text: msg.text ?? "",
-            ts: new Date((msg.date ?? Math.floor(entryTs.getTime()/1000)) * 1000),
+            userId: msg.chat?.id ?? msg.from?.id,
+            username: msg.from?.username ?? msg.chat?.title,
+            name: msg.from?.first_name ?? msg.chat?.title,
+            text: msg.text ?? msg.caption ?? "",
+            ts: new Date((msg.date ?? Math.floor(entryTs.getTime() / 1000)) * 1000),
             raw: joined,
             entities: msg.entities ?? null,
           });
         }
-      } catch (e) {
-        // ignore parse failure
+
+        // Incoming edited message
+        if (upd.edited_message) {
+          const msg = upd.edited_message;
+          messages.push({
+            direction: "in",
+            kind: "edit",
+            userId: msg.chat?.id ?? msg.from?.id,
+            username: msg.from?.username ?? msg.chat?.title,
+            name: msg.from?.first_name ?? msg.chat?.title,
+            text: msg.text ?? msg.caption ?? "",
+            ts: new Date((msg.edit_date ?? msg.date ?? Math.floor(entryTs.getTime() / 1000)) * 1000),
+            raw: joined,
+            entities: msg.entities ?? null,
+          });
+        }
+
+        // Callback query (inline button clicks)
+        if (upd.callback_query) {
+          const cb = upd.callback_query;
+          messages.push({
+            direction: "in",
+            kind: "callback_query",
+            userId: cb.from?.id ?? cb.message?.chat?.id,
+            username: cb.from?.username,
+            name: cb.from?.first_name,
+            text: cb.data ?? (cb.message?.text ?? ""),
+            ts: new Date((cb.message?.date ?? Math.floor(entryTs.getTime() / 1000)) * 1000),
+            raw: joined,
+            callback_message: cb.message ? {
+              id: cb.message.message_id,
+              text: cb.message.text,
+            } : null,
+          });
+        }
       }
+      continue;
     }
 
-    // optional: handle other endpoints like editMessageText response, answerCallbackQuery, etc.
-    if (rest.startsWith("Endpoint: editMessageText, response:")) {
-      const jsonText = rest.replace("Endpoint: editMessageText, response:", "").trim();
-      try {
-        const data = JSON.parse(jsonText);
-        const msg = data.result;
-        if (msg) {
-          messages.push({
-            direction: "out",
-            kind: "edit",
-            userId: msg.chat?.id,
-            username: msg.chat?.username,
-            name: msg.chat?.first_name,
-            text: msg.text ?? "",
-            ts: new Date((msg.edit_date ?? msg.date ?? Math.floor(entryTs.getTime()/1000)) * 1000),
-            raw: joined,
-            entities: msg.entities ?? null,
-          });
-        }
-      } catch (e) {}
+    // Outgoing bot messages: sendMessage, sendRichMessage, sendPhoto, etc.
+    const isSendMethod = endpoint === "sendMessage" || endpoint === "sendRichMessage" || (endpoint && endpoint.startsWith("send"));
+    const isEditMethod = endpoint === "editMessageText" || (endpoint && endpoint.startsWith("editMessage"));
+
+    if (isSendMethod) {
+      const msg = data.result;
+      if (msg && typeof msg === "object" && msg.chat) {
+        messages.push({
+          direction: "out",
+          kind: "message",
+          userId: msg.chat.id,
+          username: msg.chat.username,
+          name: msg.chat.first_name ?? msg.chat.title,
+          text: msg.text ?? msg.caption ?? "",
+          ts: new Date((msg.date ?? Math.floor(entryTs.getTime() / 1000)) * 1000),
+          raw: joined,
+          entities: msg.entities ?? null,
+        });
+      }
+    } else if (isEditMethod) {
+      const msg = data.result;
+      if (msg && typeof msg === "object" && msg.chat) {
+        messages.push({
+          direction: "out",
+          kind: "edit",
+          userId: msg.chat.id,
+          username: msg.chat.username,
+          name: msg.chat.first_name ?? msg.chat.title,
+          text: msg.text ?? msg.caption ?? "",
+          ts: new Date((msg.edit_date ?? msg.date ?? Math.floor(entryTs.getTime() / 1000)) * 1000),
+          raw: joined,
+          entities: msg.entities ?? null,
+        });
+      }
     }
   }
 
-  // final sort by timestamp
+  // Final sort by timestamp
   messages.sort((a, b) => a.ts - b.ts);
   return messages;
 }
