@@ -96,3 +96,48 @@ export const truncate = (text, maxLength = 50) => {
     if (!text || text.length <= maxLength) return text;
     return text.slice(0, maxLength).trim() + '…';
 };
+
+/**
+ * Short elapsed gap between two consecutive events.
+ * Log timestamps are whole seconds, so there is no sub-second precision to show.
+ * Output: "+3s", "+2m 05s", "+1h 12m"
+ */
+export const formatElapsed = (ms) => {
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `+${s}s`;
+    if (s < 3600) return `+${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+    return `+${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
+};
+
+/**
+ * Coarse duration for spans covering days.
+ * Output: "4d 7h", "7h 12m", "12m"
+ */
+export const formatSpan = (ms) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d) return `${d}d ${h}h`;
+    if (h) return `${h}h ${String(m).padStart(2, '0')}m`;
+    return `${m}m`;
+};
+
+/**
+ * Compact date + time for the detail panel.
+ * Output: "02/09, 23:51:23"
+ */
+export const formatShortDateTime = (date) => {
+    if (!(date instanceof Date) || isNaN(date)) return '';
+    return date.toLocaleString('en-GB', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+    });
+};
+
+/** Thousands separators for counts. */
+export const formatCount = (n) => Number(n ?? 0).toLocaleString('en-US');

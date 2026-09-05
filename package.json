@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node test/parser.test.js",
+    "test": "node test/parser.test.js && node test/viewer.test.js",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d dist"
   },

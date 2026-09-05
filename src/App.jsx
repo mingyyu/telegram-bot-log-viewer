@@ -1,156 +1,201 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { parseLogs } from './parser';
+import { buildIdentities, resolvePlayer } from './utils/identity';
+import { computeStats, categorize, CATEGORIES } from './utils/stats';
+import { formatCount } from './utils/format';
 import { getInitialTheme, saveTheme, applyTheme } from './utils/theme';
-import { SunIcon, MoonIcon, UploadIcon, MessageIcon } from './components/Icons';
+import { SunIcon, MoonIcon, UploadIcon, MessageIcon, PanelIcon } from './components/Icons';
 import SearchBar from './components/SearchBar';
-import ChatItem from './components/ChatItem';
+import PlayerList from './components/PlayerList';
 import Avatar from './components/Avatar';
 import MessageList from './components/MessageList';
+import FilterBar from './components/FilterBar';
+import DetailPanel from './components/DetailPanel';
+
+const ALL_ON = Object.fromEntries(CATEGORIES.map(c => [c.id, true]));
 
 export default function App() {
-  // State
   const [messages, setMessages] = useState([]);
-  const [chats, setChats] = useState([]);
+  const [fileName, setFileName] = useState('');
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [theme, setTheme] = useState(getInitialTheme);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [playerSearch, setPlayerSearch] = useState('');
   const [messageSearch, setMessageSearch] = useState('');
+  const [sort, setSort] = useState('recent');
+  const [alliance, setAlliance] = useState('all');
+  const [filters, setFilters] = useState(ALL_ON);
+  const [detailOpen, setDetailOpen] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
 
   const fileInputRef = useRef(null);
   const dragCounter = useRef(0);
 
-  // Apply theme on mount and change
   useEffect(() => {
     applyTheme(theme);
     saveTheme(theme);
   }, [theme]);
 
-  // Toggle theme
-  const toggleTheme = () => {
-    setTheme(prev => prev === 'light' ? 'dark' : 'light');
-  };
-
-  // Handle file input
   const handleFile = useCallback((file) => {
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = () => {
-      const parsed = parseLogs(reader.result);
-      setMessages(parsed);
-      setSearchQuery('');
+      setMessages(parseLogs(reader.result));
+      setFileName(file.name);
+      setPlayerSearch('');
       setMessageSearch('');
+      setAlliance('all');
+      setFilters(ALL_ON);
     };
     reader.readAsText(file);
   }, []);
 
-  const handleFileChange = (e) => {
-    const file = e.target.files?.[0];
-    handleFile(file);
-  };
-
-  // Drag and drop handlers
+  // ---- Drag and drop ----
   const handleDragEnter = (e) => {
     e.preventDefault();
     e.stopPropagation();
     dragCounter.current++;
-    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-      setIsDragging(true);
-    }
+    if (e.dataTransfer.items?.length > 0) setIsDragging(true);
   };
-
   const handleDragLeave = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    dragCounter.current--;
-    if (dragCounter.current === 0) {
-      setIsDragging(false);
-    }
+    if (--dragCounter.current === 0) setIsDragging(false);
   };
-
   const handleDragOver = (e) => {
     e.preventDefault();
     e.stopPropagation();
   };
-
   const handleDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
     dragCounter.current = 0;
-
     const file = e.dataTransfer.files?.[0];
-    if (file && (file.name.endsWith('.txt') || file.name.endsWith('.log'))) {
-      handleFile(file);
-    }
+    if (file && /\.(txt|log)$/i.test(file.name)) handleFile(file);
   };
 
-  // Build chat list from messages
-  useEffect(() => {
-    const map = new Map();
+  // ---- Derived: one pass for identities, then a chat per player ----
+  const chats = useMemo(() => {
+    const identities = buildIdentities(messages);
+    const grouped = new Map();
 
     for (const m of messages) {
       const key = m.userId ?? 'unknown';
-
-      if (!map.has(key)) {
-        map.set(key, {
-          userId: key,
-          username: m.username || m.name || String(key),
-          messages: [],
-        });
+      let entry = grouped.get(key);
+      if (!entry) {
+        entry = { userId: key, username: null, messages: [] };
+        grouped.set(key, entry);
       }
-      map.get(key).messages.push(m);
+      if (!entry.username) entry.username = m.username || m.name || null;
+      entry.messages.push(m);
     }
 
-    const chatArray = Array.from(map.values())
-      .map(c => ({
-        ...c,
-        messages: c.messages.sort((a, b) => a.ts - b.ts),
-      }))
-      .sort(
-        (a, b) =>
-          b.messages[b.messages.length - 1].ts -
-          a.messages[a.messages.length - 1].ts
-      );
-
-    setChats(chatArray);
-
-    if (!selectedUserId && chatArray.length > 0) {
-      setSelectedUserId(chatArray[0].userId);
-    }
+    return Array.from(grouped.values()).map(entry => ({
+      userId: entry.userId,
+      player: resolvePlayer(entry.userId, identities.get(entry.userId), entry.username),
+      messages: entry.messages,
+      stats: computeStats(entry.messages),
+    }));
   }, [messages]);
 
-  // Filter chats based on search query
-  const filteredChats = useMemo(() => {
-    if (!searchQuery) return chats;
+  const alliances = useMemo(
+    () => Array.from(new Set(chats.map(c => c.player.alliance).filter(Boolean))).sort(),
+    [chats]
+  );
 
-    const query = searchQuery.toLowerCase();
-    return chats.filter(chat =>
-      chat.username.toLowerCase().includes(query) ||
-      String(chat.userId).includes(query) ||
-      chat.messages.some(m => m.text?.toLowerCase().includes(query))
-    );
-  }, [chats, searchQuery]);
+  const visibleChats = useMemo(() => {
+    let out = chats;
 
-  // Current selected chat
-  const currentChat = chats.find(c => c.userId === selectedUserId);
+    if (alliance === 'none') out = out.filter(c => !c.player.alliance);
+    else if (alliance !== 'all') out = out.filter(c => c.player.alliance === alliance);
+
+    const q = playerSearch.trim().toLowerCase();
+    if (q) {
+      out = out.filter(c =>
+        c.player.label.toLowerCase().includes(q) ||
+        (c.player.username ?? '').toLowerCase().includes(q) ||
+        (c.player.alliance ?? '').toLowerCase().includes(q) ||
+        String(c.userId).includes(q) ||
+        c.messages.some(m => m.text?.toLowerCase().includes(q))
+      );
+    }
+
+    const sorted = [...out];
+    if (sort === 'name') sorted.sort((a, b) => a.player.label.localeCompare(b.player.label));
+    else if (sort === 'messages') sorted.sort((a, b) => b.stats.total - a.stats.total);
+    else sorted.sort((a, b) => b.stats.lastSeen - a.stats.lastSeen);
+    return sorted;
+  }, [chats, alliance, playerSearch, sort]);
+
+  // Keep a valid selection: default to the most recently active player.
+  useEffect(() => {
+    if (chats.length === 0) {
+      setSelectedUserId(null);
+      return;
+    }
+    if (chats.some(c => c.userId === selectedUserId)) return;
+    const newest = chats.reduce((a, b) => (b.stats.lastSeen > a.stats.lastSeen ? b : a));
+    setSelectedUserId(newest.userId);
+  }, [chats, selectedUserId]);
+
+  const currentChat = chats.find(c => c.userId === selectedUserId) ?? null;
+
+  const counts = useMemo(() => {
+    const tally = Object.fromEntries(CATEGORIES.map(c => [c.id, 0]));
+    for (const m of currentChat?.messages ?? []) tally[categorize(m)]++;
+    return tally;
+  }, [currentChat]);
+
+  const selectPlayer = useCallback((userId) => {
+    setSelectedUserId(userId);
+    setMessageSearch('');
+  }, []);
+
+  // Arrow keys step through the player list without leaving the message pane.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.target.closest('input, select, textarea')) return;
+      if (visibleChats.length === 0) return;
+
+      e.preventDefault();
+      const i = visibleChats.findIndex(c => c.userId === selectedUserId);
+      const next = e.key === 'ArrowDown'
+        ? Math.min(visibleChats.length - 1, i + 1)
+        : Math.max(0, i - 1);
+      selectPlayer(visibleChats[next].userId);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [visibleChats, selectedUserId, selectPlayer]);
+
+  const toggleFilter = (id) => setFilters(f => ({ ...f, [id]: !f[id] }));
 
   return (
     <div
-      className="app"
+      className={`app${detailOpen && currentChat ? ' with-detail' : ''}`}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h1>📋 Log Viewer</h1>
+          <div className="brand">
+            <span className="brand-mark">◧</span>
+            <div>
+              <h1>Log Viewer</h1>
+              {fileName && (
+                <div className="brand-sub" title={fileName}>
+                  {fileName} · {formatCount(messages.length)} events
+                </div>
+              )}
+            </div>
+          </div>
           <button
-            className="theme-toggle"
-            onClick={toggleTheme}
+            className="icon-btn"
+            onClick={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))}
             aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
             title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
           >
@@ -158,106 +203,112 @@ export default function App() {
           </button>
         </div>
 
-        <SearchBar
-          value={searchQuery}
-          onChange={setSearchQuery}
-          placeholder="Search users or messages..."
-        />
-
-        {/* Upload button */}
-        <div style={{ padding: '0 12px 12px' }}>
-          <button
-            className="upload-btn"
-            onClick={() => fileInputRef.current?.click()}
-            style={{ width: '100%', justifyContent: 'center' }}
-          >
+        <div className="upload-row">
+          <button className="upload-btn" onClick={() => fileInputRef.current?.click()}>
             <UploadIcon />
-            Upload Log File
+            {messages.length ? 'Load another log' : 'Upload log file'}
           </button>
           <input
             ref={fileInputRef}
             type="file"
             accept=".txt,.log"
-            onChange={handleFileChange}
+            onChange={(e) => handleFile(e.target.files?.[0])}
             className="hidden-input"
           />
         </div>
 
-        {/* Chat list */}
-        <div className="chat-list">
-          {filteredChats.length === 0 && searchQuery && (
-            <div className="no-results">
-              <p>No users matching "{searchQuery}"</p>
-            </div>
-          )}
-
-          {filteredChats.map(chat => (
-            <ChatItem
-              key={chat.userId}
-              chat={chat}
-              active={chat.userId === selectedUserId}
-              onClick={() => {
-                setSelectedUserId(chat.userId);
-                setMessageSearch('');
-              }}
-            />
-          ))}
-        </div>
+        {messages.length > 0 && (
+          <PlayerList
+            chats={visibleChats}
+            alliances={alliances}
+            selectedUserId={selectedUserId}
+            onSelect={selectPlayer}
+            search={playerSearch}
+            onSearchChange={setPlayerSearch}
+            sort={sort}
+            onSortChange={setSort}
+            alliance={alliance}
+            onAllianceChange={setAlliance}
+            totalCount={chats.length}
+          />
+        )}
       </aside>
 
-      {/* Main Chat View */}
       <main className="chat-view">
         {!currentChat && (
           <div className="empty-state">
             <MessageIcon />
             <h2>Telegram Bot Log Viewer</h2>
-            <p>
-              Upload a log file to view conversations.
-              Drag and drop or click the upload button.
+            <p>Drop a <code>.log</code> or <code>.txt</code> file anywhere, or use the upload button.</p>
+            <p className="empty-hint">
+              Players are labelled by their in-game name and emoji when the log contains
+              their profile reply, and by Telegram username otherwise.
             </p>
           </div>
         )}
 
         {currentChat && (
           <>
-            {/* Chat header */}
-            <div className="chat-header">
-              <Avatar
-                name={currentChat.username}
-                userId={currentChat.userId}
-                size="small"
-              />
-              <div className="chat-header-info">
-                <div className="chat-header-name">{currentChat.username}</div>
-                <div className="chat-header-status">
-                  ID: {currentChat.userId} • {currentChat.messages.length} messages
+            <header className="chat-header">
+              <Avatar player={currentChat.player} size="small" />
+              <div className="chat-title">
+                <div className="chat-name">
+                  {currentChat.player.label}
+                  {currentChat.player.alliance && (
+                    <span className="alliance-chip">{currentChat.player.alliance}</span>
+                  )}
+                </div>
+                <div className="chat-meta">
+                  {currentChat.player.title && <>{currentChat.player.title} · </>}
+                  {currentChat.player.username && <>@{currentChat.player.username} · </>}
+                  <span className="mono">{currentChat.userId}</span> ·{' '}
+                  {formatCount(currentChat.stats.total)} messages
                 </div>
               </div>
 
-              {/* Message search within chat */}
-              <div style={{ width: 250 }}>
+              <div className="chat-search">
                 <SearchBar
                   value={messageSearch}
                   onChange={setMessageSearch}
-                  placeholder="Search in chat..."
+                  placeholder="Search in chat…"
                 />
               </div>
-            </div>
 
-            {/* Messages */}
+              <button
+                className={`icon-btn${detailOpen ? ' active' : ''}`}
+                onClick={() => setDetailOpen(v => !v)}
+                aria-label={`${detailOpen ? 'Hide' : 'Show'} player details`}
+                title={`${detailOpen ? 'Hide' : 'Show'} player details`}
+              >
+                <PanelIcon />
+              </button>
+            </header>
+
+            <FilterBar
+              filters={filters}
+              counts={counts}
+              onToggle={toggleFilter}
+              onReset={() => setFilters(ALL_ON)}
+            />
+
             <MessageList
               messages={currentChat.messages}
-              searchQuery={messageSearch}
+              query={messageSearch}
+              filters={filters}
+              selectedUserId={selectedUserId}
             />
           </>
         )}
 
-        {/* Drop zone overlay */}
-        <div className={`drop-zone ${isDragging ? 'active' : ''}`}>
+        <div className={`drop-zone${isDragging ? ' active' : ''}`}>
           <UploadIcon />
           <p>Drop log file here</p>
         </div>
       </main>
+
+      {currentChat && detailOpen && (
+        <DetailPanel chat={currentChat} onCommandClick={setMessageSearch} />
+      )}
     </div>
   );
 }

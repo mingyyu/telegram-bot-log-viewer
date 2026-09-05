@@ -1,6 +1,6 @@
 import { SearchIcon, XIcon } from './Icons';
 
-export default function SearchBar({ value, onChange, placeholder = 'Search...' }) {
+export default function SearchBar({ value, onChange, placeholder = 'Search…' }) {
     return (
         <div className="search-container">
             <div className="search-bar">
@@ -10,15 +10,10 @@ export default function SearchBar({ value, onChange, placeholder = 'Search...' }
                     value={value}
                     onChange={(e) => onChange(e.target.value)}
                     placeholder={placeholder}
-                    aria-label="Search"
+                    aria-label={placeholder}
                 />
                 {value && (
-                    <button
-                        className="theme-toggle"
-                        onClick={() => onChange('')}
-                        style={{ width: 28, height: 28, fontSize: 14 }}
-                        aria-label="Clear search"
-                    >
+                    <button className="search-clear" onClick={() => onChange('')} aria-label="Clear search">
                         <XIcon />
                     </button>
                 )}

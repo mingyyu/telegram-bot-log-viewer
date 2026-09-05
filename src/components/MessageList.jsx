@@ -1,84 +1,136 @@
-import { useMemo, useEffect, useRef } from 'react';
+import { useMemo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import MessageBubble from './MessageBubble';
-import { formatDate, isSameDay } from '../utils/format';
+import { formatDate, formatSpan, formatCount } from '../utils/format';
+import { categorize } from '../utils/stats';
 
-export default function MessageList({ messages, searchQuery }) {
+// Chats run to a few thousand messages. Rather than mount every node, render a
+// trailing window and extend it as the user scrolls back — which matches how a
+// chat is read anyway.
+const WINDOW = 250;
+
+// Gaps at or above this get their own divider, marking session boundaries.
+const GAP_MS = 5 * 60 * 1000;
+
+export default function MessageList({ messages, query, filters, selectedUserId }) {
     const containerRef = useRef(null);
+    const heightBeforeGrow = useRef(0);
+    const [limit, setLimit] = useState(WINDOW);
 
-    // Group messages by date
-    const groupedMessages = useMemo(() => {
-        const groups = [];
-        let currentDate = null;
+    const filtered = useMemo(() => {
+        const q = query.trim().toLowerCase();
+        return messages.filter(m => {
+            if (!filters[categorize(m)]) return false;
+            if (q && !m.text?.toLowerCase().includes(q)) return false;
+            return true;
+        });
+    }, [messages, query, filters]);
 
-        for (const msg of messages) {
-            if (!currentDate || !isSameDay(msg.ts, currentDate)) {
-                currentDate = msg.ts;
-                groups.push({
-                    type: 'date',
-                    date: msg.ts
-                });
-            }
-            groups.push({
-                type: 'message',
-                data: msg
-            });
-        }
+    // Restart the window whenever the visible set changes for a new reason.
+    useEffect(() => { setLimit(WINDOW); }, [selectedUserId, query, filters]);
 
-        return groups;
-    }, [messages]);
+    const visible = filtered.slice(Math.max(0, filtered.length - limit));
+    const hiddenAbove = filtered.length - visible.length;
 
-    // Filter messages if search query exists
-    const filteredItems = useMemo(() => {
-        if (!searchQuery) return groupedMessages;
+    // Interleave date separators, long-gap dividers and messages, and attach the
+    // elapsed time from the previous *unfiltered-out* message.
+    const items = useMemo(() => {
+        const out = [];
+        let prevTs = null;
 
-        const query = searchQuery.toLowerCase();
-        const filtered = [];
-        let lastDateAdded = null;
-
-        for (const item of groupedMessages) {
-            if (item.type === 'date') {
-                lastDateAdded = item;
-            } else if (item.data.text?.toLowerCase().includes(query)) {
-                // Add date separator if needed
-                if (lastDateAdded && !filtered.includes(lastDateAdded)) {
-                    filtered.push(lastDateAdded);
+        for (const msg of visible) {
+            if (!prevTs || !sameDay(msg.ts, prevTs)) {
+                out.push({ type: 'date', key: `d-${msg.ts.getTime()}`, date: msg.ts });
+            } else {
+                const gap = msg.ts - prevTs;
+                if (gap >= GAP_MS) {
+                    out.push({ type: 'gap', key: `g-${msg.ts.getTime()}`, gap });
                 }
-                filtered.push(item);
             }
+
+            out.push({
+                type: 'msg',
+                key: `${msg.ts.getTime()}-${out.length}`,
+                data: msg,
+                elapsedMs: prevTs && sameDay(msg.ts, prevTs) ? msg.ts - prevTs : null,
+            });
+            prevTs = msg.ts;
         }
+        return out;
+    }, [visible]);
 
-        return filtered;
-    }, [groupedMessages, searchQuery]);
+    // Land at the newest message when switching players or loading a file.
+    useLayoutEffect(() => {
+        const el = containerRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+    }, [selectedUserId, messages]);
 
-    // Scroll to bottom when messages change
-    useEffect(() => {
-        if (containerRef.current) {
-            containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    // Growing the window prepends content; keep the reader where they were.
+    useLayoutEffect(() => {
+        const el = containerRef.current;
+        if (!el || !heightBeforeGrow.current) return;
+        el.scrollTop += el.scrollHeight - heightBeforeGrow.current;
+        heightBeforeGrow.current = 0;
+    }, [limit]);
+
+    const handleScroll = (e) => {
+        const el = e.currentTarget;
+        if (el.scrollTop < 240 && limit < filtered.length) {
+            heightBeforeGrow.current = el.scrollHeight;
+            setLimit(l => l + WINDOW);
         }
-    }, [messages]);
+    };
 
-    if (filteredItems.length === 0 && searchQuery) {
+    if (filtered.length === 0) {
         return (
-            <div className="messages-container" ref={containerRef}>
+            <div className="messages" ref={containerRef}>
                 <div className="no-results">
-                    <p>No messages matching "{searchQuery}"</p>
+                    <p>{query
+                        ? `No messages matching "${query}"`
+                        : 'No messages match the active filters.'}</p>
                 </div>
             </div>
         );
     }
 
     return (
-        <div className="messages-container" ref={containerRef}>
-            {filteredItems.map((item, index) => {
+        <div className="messages" ref={containerRef} onScroll={handleScroll}>
+            {hiddenAbove > 0 && (
+                <div className="window-notice">
+                    Scroll up to load {formatCount(hiddenAbove)} earlier message
+                    {hiddenAbove === 1 ? '' : 's'}
+                </div>
+            )}
+
+            {items.map(item => {
                 if (item.type === 'date') {
                     return (
-                        <div key={`date-${index}`} className="date-separator">
+                        <div key={item.key} className="date-sep">
                             <span>{formatDate(item.date)}</span>
                         </div>
                     );
                 }
-                return <MessageBubble key={index} message={item.data} />;
+                if (item.type === 'gap') {
+                    return (
+                        <div key={item.key} className="gap-sep">
+                            <span>{formatSpan(item.gap)} later</span>
+                        </div>
+                    );
+                }
+                return (
+                    <MessageBubble
+                        key={item.key}
+                        message={item.data}
+                        elapsedMs={item.elapsedMs}
+                        query={query.trim()}
+                    />
+                );
             })}
         </div>
     );
+}
+
+function sameDay(a, b) {
+    return a.getFullYear() === b.getFullYear()
+        && a.getMonth() === b.getMonth()
+        && a.getDate() === b.getDate();
 }
